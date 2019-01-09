@@ -1,10 +1,13 @@
 """Airtable API Class"""
 import os
+import time
 import collections
 import requests
 import json
+from functools import reduce
 
-Table = collections.namedtuple("Table", ("name", "status"))
+Table = collections.namedtuple("Table", ["name", "status"])
+Users = collections.namedtuple("User", ("id", "template"))
 
 
 class Airtable:
@@ -15,12 +18,11 @@ class Airtable:
     KEY = os.environ["AIRTABLE_API_KEY"]
     TABLES = []
     RECORDS = []
-    TITLES = []
-    TITLE_IDS = []
-    PLACEHOLDERS = []
-    PLACEHOLDERS_IDS = []
+    TEMPLATES = {}
+    PLACEHOLDERS = {}
     USER_ID = ""
-    JSON_STRUCT = {}
+    TEMPLATE_STRUCT = {}
+    USERS = []
 
     def __init__(self, url=URL, key=KEY):
         self.url = url
@@ -43,33 +45,80 @@ class Airtable:
         return self.TABLE_URL
 
     def get_title_info(self, title_id):
-        self.set_table("Titles")
-        with self._session() as sess:
-            sess.headers.update(self._auth)
-            resp = sess.get(f"{self.TABLE_URL}/{title_id}")
+        if len(self.TEMPLATES) != 0:
+            if title_id in self.TEMPLATES:
+                template = self.TEMPLATES[title_id]
+                return (template["title"], template["placeholders"])
+            else:
+                self.set_table("Titles")
+                with self._session() as sess:
+                    sess.headers.update(self._auth)
+                    resp = sess.get(f"{self.TABLE_URL}/{title_id}")
 
-            if resp.ok:
-                data = resp.json()
-                title = data.get("fields").get("Title")
-                associated_placeholders = data.get("fields").get(
-                    "Templates", []
-                )
-                return (title, associated_placeholders)
+                    if resp.ok:
+                        data = resp.json()
+                        title = data.get("fields").get("Title")
+                        associated_placeholders = data.get("fields").get(
+                            "Templates", []
+                        )
+                        self.TEMPLATES[title_id] = {
+                            "title": title,
+                            "placeholders": associated_placeholders,
+                        }
+                        return (title, associated_placeholders)
 
-            sess.close()
+                    sess.close()
+        else:
+            self.set_table("Titles")
+            with self._session() as sess:
+                sess.headers.update(self._auth)
+                resp = sess.get(f"{self.TABLE_URL}/{title_id}")
+
+                if resp.ok:
+                    data = resp.json()
+                    title = data.get("fields").get("Title")
+                    associated_placeholders = data.get("fields").get(
+                        "Templates", []
+                    )
+                    self.TEMPLATES[title_id] = {
+                        "title": title,
+                        "placeholders": associated_placeholders,
+                    }
+                    return (title, associated_placeholders)
+
+                sess.close()
 
     def get_placeholder_info(self, placeholder_id):
-        self.set_table("Templates")
-        with self._session() as sess:
-            sess.headers.update(self._auth)
-            resp = sess.get(f"{self.TABLE_URL}/{placeholder_id}")
-
-            if resp.ok:
-                data = resp.json()
-                placeholder = data.get("fields").get("Template Name")
+        if len(self.PLACEHOLDERS) != 0:
+            if placeholder_id in self.PLACEHOLDERS:
+                placeholder = self.PLACEHOLDERS[placeholder_id]
                 return placeholder
+            else:
+                self.set_table("Templates")
+                with self._session() as sess:
+                    sess.headers.update(self._auth)
+                    resp = sess.get(f"{self.TABLE_URL}/{placeholder_id}")
 
-            sess.close()
+                    if resp.ok:
+                        data = resp.json()
+                        placeholder = data.get("fields").get("Template Name")
+                        self.PLACEHOLDERS[placeholder_id] = placeholder
+                        return placeholder
+
+                    sess.close()
+        else:
+            self.set_table("Templates")
+            with self._session() as sess:
+                sess.headers.update(self._auth)
+                resp = sess.get(f"{self.TABLE_URL}/{placeholder_id}")
+
+                if resp.ok:
+                    data = resp.json()
+                    placeholder = data.get("fields").get("Template Name")
+                    self.PLACEHOLDERS[placeholder_id] = placeholder
+                    return placeholder
+
+                sess.close()
 
     def get_records(self):
         with self._session() as sess:
@@ -103,35 +152,43 @@ class Airtable:
         return self.RECORDS
 
     def build_user_template(self):
+        time_start = time.time()
         titles = []
         placeholders = []
         associated_placeholders = []
+        TEMPLATE_STRUCT = {}
 
         if self.RECORDS is []:
             pass
         else:
             for record in self.RECORDS:
-                self.USER_ID = record.get("fields").get("User ID")
-                titles = record.get("fields").get("Titles")
+                if not record.get("fields"):
+                    print(record)
+                    continue
+                user_id = record.get("fields").get("User ID")
                 placeholders = record.get("fields").get("Templates")
+                titles = record.get("fields").get("Titles")
 
-        for title_id in titles:
-            # if title_id in self.TITLE_IDS:
-            #     title = self.TITLES[title_id]
-            (title, associated_placeholders) = self.get_title_info(title_id)
-            self.JSON_STRUCT[title] = []
+                for title_id in titles:
+                    (title, linked_placeholders) = self.get_title_info(title_id)
+                    TEMPLATE_STRUCT[title] = []
+                    for placeholder_id in linked_placeholders:
+                        if placeholder_id in placeholders:
+                            placeholder = self.get_placeholder_info(
+                                placeholder_id
+                            )
+                            TEMPLATE_STRUCT[title].append(placeholder)
+                self.USERS.append(Users(user_id, TEMPLATE_STRUCT))
+                TEMPLATE_STRUCT = {}
+        print(time_start - time.time())
 
-            for assc_placeholder_id in associated_placeholders:
-                if assc_placeholder_id in placeholders:
-                    placeholder = self.get_placeholder_info(assc_placeholder_id)
-                    self.JSON_STRUCT[title].append(placeholder)
-
-            # self.TITLE_IDS.append(title_id)
-            # self.TITLES.append({title_id: title})
-
-    def show_user_template(self):
-        return self.JSON_STRUCT
+    def show_user_template(self, user_id):
+        """Duplicate User IDs are not allowed in our system"""
+        return list(filter((lambda user: user.id == user_id), self.USERS))[0]
 
     def write_to_file(self):
-        with open(f"{self.USER_ID}.json", "w") as json_file:
-            json.dump(self.JSON_STRUCT, json_file)
+        """merely dumping contents to a json file"""
+        for user in self.USERS:
+            with open(f"{user.id}.json", "w+") as json_file:
+                json.dump(user.template, json_file)
+                json_file.close()
